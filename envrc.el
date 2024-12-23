@@ -76,6 +76,11 @@
 Messages are written into the *envrc-debug* buffer."
   :type 'boolean)
 
+(defcustom envrc-async-processing t
+  "Whether or not to update the environment asynchronously."
+  :group 'envrc
+  :type 'boolean)
+
 (defcustom envrc-update-on-eshell-directory-change t
   "Whether envrc will update environment when changing directory in eshell."
   :type 'boolean)
@@ -178,6 +183,16 @@ e.g. (define-key envrc-mode-map (kbd \"C-c e\") \\='envrc-command-map)"
   "Known envrc directories and their direnv results.
 The values are as produced by `envrc--export'.")
 
+(defvar envrc--processes (make-hash-table :test 'equal :size 10)
+  "Asynchonous processes started by envrc.
+Each entry uses an environment directory as key.
+
+Each value of this table is an alist of
+`((process . <process>) (subscribed . (buf_0 buf_1 ... buf_n)))'
+
+The SUBSCRIBED field allows subscribing buffers to have the new
+environment applied once the async process finishes.")
+
 ;;; Local state
 
 (defvar-local envrc--status 'none
@@ -224,8 +239,40 @@ PROCESS-ENV should be the environment in which direnv was run,
 since its output can vary according to its initial environment."
   (mapconcat 'identity (cons env-dir process-env) "\0"))
 
-(defun envrc--update ()
-  "Update the current buffer's environment if it is managed by direnv.
+(defun envrc--update-async ()
+  "Update the current buffer's env asynchronously if it is managed by direnv.
+All envrc.el-managed buffers with this env will have their
+environments updated."
+  (let* ((cur-buf (current-buffer))
+         (env-dir (envrc--find-env-dir))
+         (cache-key (envrc--cache-key env-dir (default-value 'process-environment)))
+         (cache (gethash cache-key envrc--cache))
+         (update-callback
+          (lambda (env)
+            (unless cache
+              (puthash cache-key env envrc--cache))
+            (unwind-protect
+                (when (buffer-live-p cur-buf)
+                  (envrc--apply cur-buf env))
+              (let ((subscribed (alist-get 'subscribed (gethash env-dir envrc--processes))))
+                (dolist (buf subscribed)
+                  (when (buffer-live-p buf)
+                    (envrc--apply buf env))))))))
+    (if env-dir
+        (if cache
+            (funcall update-callback cache)
+          (let ((running-process (alist-get 'process (gethash env-dir envrc--processes)))
+                (subscribed (alist-get 'subscribed (gethash env-dir envrc--processes))))
+            (if running-process
+                (puthash env-dir
+                         `((process . ,running-process)
+                           (subscribed . ,(cons cur-buf subscribed)))
+                         envrc--processes)
+              (envrc--export-async update-callback env-dir))))
+      (funcall update-callback 'none))))
+
+(defun envrc--update-sync ()
+  "Update the current buffer's env synchronously if it is managed by direnv.
 All envrc.el-managed buffers with this env will have their
 environments updated."
   (let ((env-dir (envrc--find-env-dir)))
@@ -239,6 +286,16 @@ environments updated."
                    (cached cached)))
              'none)))
       (envrc--apply (current-buffer) result))))
+
+(defun envrc--update ()
+  "Update the current buffer's environment if it is managed by direnv.
+All envrc.el-managed buffers with this env will have their
+environments updated.
+Synchronously or asynchronously according to the value of
+`envrc-async-processing'."
+  (if envrc-async-processing
+      (envrc--update-async)
+    (envrc--update-sync)))
 
 (defmacro envrc--at-end-of-special-buffer (name &rest body)
   "At the end of `special-mode' buffer NAME, execute BODY.
@@ -285,6 +342,58 @@ DIRECTORY is the directory in which the environment changes."
            (envrc--summarise-changes result)
            (propertize (concat "(" (abbreviate-file-name (directory-file-name directory)) ")")
                        'face 'font-lock-comment-face)))
+
+(defun envrc--export-async (callback env-dir)
+  "Export the env vars for ENV-DIR using direnv.
+Return value is either \\='error, \\='none, or an alist of environment
+variable names and values.
+
+CALLBACK the function which will get the return value."
+  (let* ((default-directory env-dir)
+         (stdout (generate-new-buffer "*envrc-export*"))
+         (stderr (generate-new-buffer "*envrc-export-stderr*"))
+         (export-callback
+          (lambda (exit-code)
+            (unless (envrc--env-dir-p env-dir)
+              (error "%s is not a directory with a .envrc" env-dir))
+            (message "Running direnv in %s ..." env-dir)
+            (let (result)
+              (with-current-buffer stdout
+                (envrc--debug "Direnv exited with %s and stderr=%S, stdout=%S"
+                              exit-code
+                              (with-current-buffer stderr
+                                (buffer-string))
+                              (buffer-string))
+                (if (eq 0 exit-code) ;; zerop is not an option, as exit-code may sometimes be a symbol
+                    (progn
+                      (if (zerop (buffer-size))
+                          (setq result 'none)
+                        (goto-char (point-min))
+                        (prog1
+                            (setq result (let ((json-key-type 'string)) (json-read-object)))
+                          (when envrc-show-summary-in-minibuffer
+                            (envrc--show-summary result env-dir)))))
+                  (message "Direnv failed in %s" env-dir)
+                  (setq result 'error))
+                (envrc--at-end-of-special-buffer "*envrc*"
+                  (insert "──── " (format-time-string "%Y-%m-%d %H:%M:%S") " ──── " env-dir " ────\n\n")
+                  (let ((initial-pos (point))
+                        ansi-color-context)
+                    (insert (with-current-buffer stderr
+                              (ansi-color-apply (buffer-string))))
+                    (goto-char (point-max))
+                    (add-face-text-property initial-pos (point) (if (eq 0 exit-code) 'success 'error)))
+                  (insert "\n\n")
+                  (when (and (numberp exit-code) (/= 0 exit-code))
+                    (display-buffer (current-buffer)))))
+              (kill-buffer stdout)
+              (kill-buffer stderr)
+              result)))
+         (sentinel (lambda (process msg)
+                     (funcall callback
+                              (funcall export-callback
+                                       (envrc--async-process-sentinel process msg))))))
+    (envrc--start-process-with-global-env sentinel stdout stderr envrc-direnv-executable "export" "json")))
 
 (defun envrc--export (env-dir)
   "Export the env vars for ENV-DIR using direnv.
@@ -433,6 +542,37 @@ ARGS is as for `call-process'."
         (process-environment (default-value 'process-environment)))
     (apply 'process-file args)))
 
+(defun envrc--start-process-with-global-env (sentinel out-buf err-buf &rest args)
+  "Like `start-process', but always use the global process environment.
+In particular, we ensure the default variable `exec-path' and
+`process-environment' are used.  This ensures an .envrc doesn't take
+`envrc-direnv-executable' out of our path.
+
+SENTINEL, OUT-BUF, ERR-BUF and ARGS are the respective keywords of
+`make-process'."
+  (let* ((env-dir default-directory)
+         (running-process (alist-get 'process (gethash env-dir envrc--processes)))
+         (wrapped-sentinel (lambda (process msg)
+                             ;; Ensure the process is deleted even if the buffer
+                             ;; no longer exits.
+                             (unwind-protect
+                                 (funcall sentinel process msg)
+                               (remhash env-dir envrc--processes)))))
+    (if running-process
+        (envrc--debug "Ignoring, process already running for %s." env-dir)
+      (let* ((exec-path (default-value 'exec-path))
+             (process-environment (default-value 'process-environment))
+             (process (make-process
+                       :name "*envrc-process*"
+                       :buffer out-buf
+                       :stderr err-buf
+                       :sentinel wrapped-sentinel
+                       :connection-type 'pipe
+                       :command args)))
+        (puthash env-dir `((process . ,process)
+                           (subscribed . ()))
+                 envrc--processes)))))
+
 (defun envrc-reload ()
   "Reload the current env."
   (interactive)
@@ -443,6 +583,15 @@ ARGS is as for `call-process'."
           (envrc--update-env env-dir)
         (display-buffer "*envrc-reload*")
         (user-error "Error running direnv reload")))))
+
+(defun envrc--async-process-sentinel (process msg)
+  "Return PROCESS's exit code.
+
+Display MSG in debug buffer if `envrc-debug' is non-nil."
+  (when (memq (process-status process) '(exit))
+    (let ((exit-code (process-exit-status process)))
+      (envrc--debug (concat (process-name process) " - " msg " - status: " (number-to-string exit-code)))
+      exit-code)))
 
 (defun envrc-allow ()
   "Run \"direnv allow\" in the current env."
