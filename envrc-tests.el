@@ -35,6 +35,7 @@
 
 
 (defun envrc-tests--exec (&rest args)
+  (sleep-for 0.1)
   (should (apply 'call-process envrc-direnv-executable nil nil nil args)))
 
 (defmacro envrc-tests--with-extra-global-env-var (key val &rest body)
@@ -72,13 +73,16 @@
   (envrc-tests--with-temp-directory _
     (with-temp-buffer
       (envrc-mode 1)
+      (sleep-for 0.1)
       (should (eq envrc--status 'none))
+      (sleep-for 0.1)
       (should (not (local-variable-p 'process-environment))))))
 
 
 
 (ert-deftest envrc-direnv-is-available ()
   "Check the executable is executable!"
+  (sleep-for 0.1)
   (should (executable-find envrc-direnv-executable)))
 
 (ert-deftest envrc-no-op-unless-allowed ()
@@ -88,7 +92,9 @@
       (insert "export FOO=BAR"))
     (with-temp-buffer
       (envrc-mode 1)
+      (sleep-for 0.1)
       (should (not (local-variable-p 'process-environment)))
+      (sleep-for 0.1)
       (should (eq envrc--status 'error)))))
 
 (ert-deftest envrc-setting-propagates-when-mode-enabled ()
@@ -101,8 +107,11 @@
 
     (with-temp-buffer
       (envrc-mode 1)
+      (sleep-for 0.1)
       (should (local-variable-p 'process-environment))
+      (sleep-for 0.1)
       (should (equal "BAR" (getenv "FOO")))
+      (sleep-for 0.1)
       (should (eq envrc--status 'on)))))
 
 (ert-deftest envrc-setting-propagates-when-allowed ()
@@ -112,10 +121,14 @@
 
     (with-temp-buffer
       (envrc-mode 1)
+      (sleep-for 0.1)
       (should (not (local-variable-p 'process-environment)))
       (envrc-allow)
+      (sleep-for 0.1)
       (should (local-variable-p 'process-environment))
+      (sleep-for 0.1)
       (should (equal "BAR" (getenv "FOO")))
+      (sleep-for 0.1)
       (should (eq envrc--status 'on)))))
 
 (ert-deftest envrc-setting-removed-when-denied ()
@@ -126,11 +139,16 @@
 
     (with-temp-buffer
       (envrc-mode 1)
+      (sleep-for 0.1)
       (should (local-variable-p 'process-environment))
+      (sleep-for 0.1)
       (should (equal "BAR" (getenv "FOO")))
+      (sleep-for 0.1)
       (should (eq envrc--status 'on))
       (envrc-deny)
+      (sleep-for 0.1)
       (should (not (local-variable-p 'process-environment)))
+      (sleep-for 0.1)
       (should (eq envrc--status 'error)))))
 
 (ert-deftest envrc-reload-existing-buffer ()
@@ -142,11 +160,13 @@
 
     (with-temp-buffer
       (envrc-mode 1)
+      (sleep-for 0.1)
       (should (equal "BAR" (getenv "FOO")))
       (with-temp-file ".envrc"
         (insert "export FOO=BAZ"))
       (envrc-tests--exec "allow")
       (envrc-reload)
+      (sleep-for 0.1)
       (should (equal "BAZ" (getenv "FOO"))))))
 
 (ert-deftest envrc-masks-global-var-when-overridden ()
@@ -158,8 +178,10 @@
       (envrc-tests--exec "allow")
 
       (with-temp-buffer
+        (sleep-for 0.1)
         (should (equal "BANANA" (getenv "FOO")))
         (envrc-mode 1)
+        (sleep-for 0.1)
         (should (equal "BAR" (getenv "FOO")))))))
 
 (ert-deftest envrc-state-shared-between-buffers-in-dir ()
@@ -171,19 +193,26 @@
 
     (with-temp-buffer
       (envrc-mode 1)
+      (sleep-for 0.1)
       (should (local-variable-p 'process-environment))
+      (sleep-for 0.1)
       (should (equal "BAR" (getenv "FOO")))
 
       (envrc-tests--exec "deny")
 
       (with-temp-buffer
         (envrc-mode 1)
+        (sleep-for 0.1)
         (should (local-variable-p 'process-environment))
+        (sleep-for 0.1)
         (should (equal "BAR" (getenv "FOO")))
         (envrc-reload)
+        (sleep-for 0.1)
         (should (eq envrc--status 'error)))
 
+      (sleep-for 0.1)
       (should (eq envrc--status 'error))
+      (sleep-for 0.1)
       (should (not (local-variable-p 'process-environment))))))
 
 (ert-deftest envrc-remove-variable ()
@@ -195,10 +224,12 @@
 
     (with-temp-buffer
       (envrc-mode 1)
+      (sleep-for 0.1)
       (should (equal "BAR" (getenv "FOO")))
       (with-temp-file ".envrc"
         (insert ""))
       (envrc-allow)
+      (sleep-for 0.1)
       (should (equal nil (getenv "FOO"))))))
 
 (ert-deftest envrc-cache-is-refreshed-if-global-env-changes ()
@@ -210,6 +241,7 @@
 
     (with-temp-buffer
       (envrc-mode 1)
+      (sleep-for 0.1)
       (should (equal "BAR" (getenv "FOO")))
       (envrc-tests--with-extra-global-env-var (symbol-name (cl-gensym)) "blah"
         (with-temp-file ".envrc"
@@ -219,6 +251,7 @@
           ;; We expect a cache miss, and therefore a refresh
           (envrc--debug "buffer is %S" (current-buffer))
           (envrc-mode 1)
+          (sleep-for 0.1)
           (should (local-variable-p 'process-environment))
           (should (equal "BAZ" (getenv "FOO"))))
 
@@ -252,6 +285,7 @@
 
       ;; envrc mode is not activated
       (eshell/cd envrc-dir)
+      (sleep-for 0.1)
       (should (equal nil (getenv "FOO")))
 
       ;; envrc mode is activated with option set to not update env on directory change
@@ -259,6 +293,7 @@
       (let ((envrc-update-on-eshell-directory-change nil))
         (envrc-mode 1))
       (eshell/cd envrc-dir)
+      (sleep-for 0.1)
       (should (equal nil (getenv "FOO")))
 
       ;; envrc mode is activated and updates environment with default options
@@ -266,15 +301,18 @@
       (envrc-mode -1)
       (envrc-mode 1)
       (eshell/cd envrc-dir)
+      (sleep-for 0.1)
       (should (equal "BAR" (getenv "FOO")))
 
       ;; environment is cleared when exiting directory
       (eshell/cd current-dir)
+      (sleep-for 0.1)
       (should (equal nil (getenv "FOO")))
 
       ;; environment is cleared when envrc-mode is disabled
       (eshell/cd envrc-dir)
       (envrc-mode -1)
+      (sleep-for 0.1)
       (should (equal nil (getenv "FOO"))))))
 
 ;; TODO:
