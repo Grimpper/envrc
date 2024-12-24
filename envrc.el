@@ -291,11 +291,12 @@ ENV-DIR is the directory where to update the status."
     (cancel-timer envrc--status-timer)
     (setq envrc--status-timer nil))
 
-  (dolist (buf (envrc--mode-buffers))
-    (with-current-buffer buf
-      (when (equal (envrc--find-env-dir) env-dir)
-        (setq envrc--status 'on)
-        (force-mode-line-update)))))
+  (let ((status envrc--status))
+    (dolist (buf (envrc--mode-buffers))
+      (with-current-buffer buf
+        (when (equal (envrc--find-env-dir) env-dir)
+          (setq envrc--status status)
+          (force-mode-line-update))))))
 
 
 (defun envrc--env-dir-p (dir)
@@ -635,14 +636,24 @@ In particular, we ensure the default variable `exec-path' and
 
 SENTINEL, OUT-BUF, ERR-BUF and ARGS are the respective keywords of
 `make-process'."
-  (let* ((env-dir default-directory)
+  (let* ((env-buf (current-buffer))
+         (env-dir default-directory)
          (running-process (alist-get 'process (gethash env-dir envrc--processes)))
          (wrapped-sentinel (lambda (process msg)
-                             ;; Ensure the process is deleted even if the buffer
-                             ;; no longer exits.
+                             (unless (buffer-live-p env-buf)
+                               ;; Migrate to any buffer from the same env.
+                               (setq env-buf
+                                     (seq-find (lambda (buf)
+                                                 (with-current-buffer buf
+                                                   (equal (envrc--find-env-dir) env-dir)))
+                                               (envrc--mode-buffers))))
                              (unwind-protect
-                                 (funcall sentinel process msg)
-                               (envrc-status-stop env-dir)
+                                 ;; NOTE: the call back and the status stop
+                                 ;; should run in a buffer from the same
+                                 ;; environment as the async process.
+                                 (with-current-buffer env-buf
+                                   (funcall sentinel process msg)
+                                   (envrc-status-stop env-dir))
                                (remhash env-dir envrc--processes)))))
     (if running-process
         (envrc--debug "Ignoring, process already running for %s." env-dir)
